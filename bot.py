@@ -10,7 +10,6 @@ from pyrogram.types import (
     CallbackQuery
 )
 
-# Railway Environment Variables ରୁ ଡାଟା ନେବା
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
@@ -66,7 +65,7 @@ async def upload_progress(current, total, status_msg, start_time, last_update):
 
     bar = render_progress_bar(percentage)
     text = (
-        f"📤 **Telegram କୁ ଅପଲୋଡ୍ ହେଉଛି...**\n\n"
+        f"📤 **Uploading to Telegram...**\n\n"
         f"`{bar}`\n"
         f"📦 **Size:** `{humanbytes(current)} / {humanbytes(total)}`\n"
         f"⚡ **Speed:** `{humanbytes(speed)}/s`\n"
@@ -94,7 +93,7 @@ def download_video_sync(url: str, quality: str, output_path: str, loop, status_m
             bar = render_progress_bar(percentage)
 
             text = (
-                f"📥 **ଭିଡିଓ ଡାଉନଲୋଡ୍ ହେଉଛି ({quality}p)...**\n\n"
+                f"📥 **Downloading Video ({quality}p)...**\n\n"
                 f"`{bar}`\n"
                 f"📦 **Size:** `{humanbytes(downloaded)} / {humanbytes(total)}`\n"
                 f"⚡ **Speed:** `{humanbytes(speed)}/s`\n"
@@ -116,6 +115,14 @@ def download_video_sync(url: str, quality: str, output_path: str, loop, status_m
         "format": fmt,
         "merge_output_format": "mp4",
         "outtmpl": output_path,
+        "writethumbnail": True,  # Automatically download video thumbnail
+        "postprocessors": [
+            {
+                # Convert any thumbnail (.webp/.png) to .jpg for Telegram compatibility
+                "key": "FFmpegThumbnailsConvertor",
+                "format": "jpg",
+            }
+        ],
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
@@ -132,13 +139,23 @@ def download_video_sync(url: str, quality: str, output_path: str, loop, status_m
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
-        if not os.path.exists(filename):
-            base, _ = os.path.splitext(filename)
-            if os.path.exists(base + ".mp4"):
-                filename = base + ".mp4"
+        base, _ = os.path.splitext(filename)
+
+        # Ensure we point to the merged .mp4 file
+        if not os.path.exists(filename) and os.path.exists(base + ".mp4"):
+            filename = base + ".mp4"
+
+        # Locate the converted .jpg thumbnail
+        thumb_path = base + ".jpg"
+        if not os.path.exists(thumb_path):
+            thumb_path = None
+
         title = info.get("title", "Downloaded Video")
         duration = int(info.get("duration") or 0)
-        return filename, title, duration
+        width = int(info.get("width") or 0)
+        height = int(info.get("height") or 0)
+
+        return filename, thumb_path, title, duration, width, height
 
 
 @app.on_message(filters.command("start") & filters.private)
@@ -152,8 +169,8 @@ async def start_handler(client, message):
         ]
     ])
     await message.reply_text(
-        "👋 **ନମସ୍କାର! ମୁଁ ଏକ Pro Video Downloader Bot।**\n\n"
-        "📥 ଭିଡିଓ ଲିଙ୍କ୍ ପଠାନ୍ତୁ, ତା’ପରେ ମନପସନ୍ଦର **Quality (360p, 720p, 1080p)** ବାଛନ୍ତୁ!",
+        "👋 **Welcome! I am a Pro Video Downloader Bot.**\n\n"
+        "📥 Send me any video link and choose your preferred **Quality (360p, 720p, 1080p)** to download with automatic cover thumbnails!",
         reply_markup=keyboard
     )
 
@@ -163,7 +180,7 @@ async def link_handler(client, message):
     url = message.text.strip()
 
     if not (url.startswith("http://") or url.startswith("https://")):
-        await message.reply_text("❌ ଦୟାକରି ଏକ ସଠିକ୍ ଭିଡିଓ ଲିଙ୍କ୍ (`https://...`) ପଠାନ୍ତୁ।")
+        await message.reply_text("❌ Please send a valid video URL starting with `https://...`")
         return
 
     msg_id = str(message.id)
@@ -185,8 +202,8 @@ async def link_handler(client, message):
     ])
 
     await message.reply_text(
-        "🎞️ **ଭିଡିଓ କ୍ୱାଲିଟି ବାଛନ୍ତୁ:**\n"
-        "ତଳେ ଥିବା ବଟନ୍‌ରୁ କେଉଁ କ୍ୱାଲିଟିରେ ଡାଉନଲୋଡ୍ କରିବାକୁ ଚାହୁଁଛନ୍ତି କ୍ଲିକ୍ କରନ୍ତୁ:",
+        "🎞️ **Select Video Quality:**\n"
+        "Choose a resolution from the buttons below to start downloading:",
         reply_markup=keyboard,
         quote=True
     )
@@ -198,23 +215,24 @@ async def quality_callback(client, callback_query: CallbackQuery):
 
     if quality == "cancel":
         URL_STORAGE.pop(msg_id, None)
-        await callback_query.message.edit_text("🚫 **ଡାଉନଲୋଡ୍ ବାତିଲ୍ କରାଗଲା।**")
+        await callback_query.message.edit_text("🚫 **Download cancelled.**")
         return
 
     url = URL_STORAGE.get(msg_id)
     if not url:
-        await callback_query.answer("⚠️ ଏହି ଲିଙ୍କ୍‌ର ସମୟ ଶେଷ ହୋଇଯାଇଛି! ପୁଣିଥରେ ଲିଙ୍କ୍ ପଠାନ୍ତୁ।", show_alert=True)
+        await callback_query.answer("⚠️ Link expired! Please send the video link again.", show_alert=True)
         return
 
-    await callback_query.answer(f"{quality}p ଡାଉନଲୋଡ୍ ଆରମ୍ଭ ହେଉଛି...")
-    status_msg = await callback_query.message.edit_text("🔍 **ଭିଡିଓ ଲିଙ୍କ୍ ଯାଞ୍ଚ କରାଯାଉଛି...**")
+    await callback_query.answer(f"Starting {quality}p download...")
+    status_msg = await callback_query.message.edit_text("🔍 **Fetching video info and thumbnail...**")
 
     output_template = os.path.join(DOWNLOAD_DIR, f"{msg_id}_{quality}_%(id)s.%(ext)s")
     file_path = None
+    thumb_path = None
     loop = asyncio.get_running_loop()
 
     try:
-        file_path, title, duration = await asyncio.to_thread(
+        file_path, thumb_path, title, duration, width, height = await asyncio.to_thread(
             download_video_sync, url, quality, output_template, loop, status_msg
         )
 
@@ -223,8 +241,11 @@ async def quality_callback(client, callback_query: CallbackQuery):
 
         await callback_query.message.reply_video(
             video=file_path,
+            thumb=thumb_path,
             caption=f"🎬 **{title}**\n✨ **Quality:** `{quality}p`",
             duration=duration,
+            width=width,
+            height=height,
             supports_streaming=True,
             progress=upload_progress,
             progress_args=(status_msg, start_time, last_update)
@@ -234,19 +255,4 @@ async def quality_callback(client, callback_query: CallbackQuery):
 
     except Exception as e:
         await status_msg.edit_text(
-            f"⚠️ **ଡାଉନଲୋଡ୍ ବିଫଳ ହେଲା!**\n"
-            f"କାରଣ: `{str(e)[:200]}`"
-        )
-
-    finally:
-        URL_STORAGE.pop(msg_id, None)
-        if file_path and os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-            except OSError:
-                pass
-
-
-if __name__ == "__main__":
-    print("🤖 Bot is running on Railway...")
-    app.run()
+            f
