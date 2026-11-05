@@ -115,10 +115,9 @@ def download_video_sync(url: str, quality: str, output_path: str, loop, status_m
         "format": fmt,
         "merge_output_format": "mp4",
         "outtmpl": output_path,
-        "writethumbnail": True,  # Automatically download video thumbnail
+        "writethumbnail": True,
         "postprocessors": [
             {
-                # Convert any thumbnail (.webp/.png) to .jpg for Telegram compatibility
                 "key": "FFmpegThumbnailsConvertor",
                 "format": "jpg",
             }
@@ -141,13 +140,22 @@ def download_video_sync(url: str, quality: str, output_path: str, loop, status_m
         filename = ydl.prepare_filename(info)
         base, _ = os.path.splitext(filename)
 
-        # Ensure we point to the merged .mp4 file
         if not os.path.exists(filename) and os.path.exists(base + ".mp4"):
             filename = base + ".mp4"
 
-        # Locate the converted .jpg thumbnail
+        # Locate thumbnail or extract frame via ffmpeg if missing
         thumb_path = base + ".jpg"
         if not os.path.exists(thumb_path):
+            try:
+                import subprocess
+                subprocess.run(
+                    ["ffmpeg", "-ss", "00:00:02", "-i", filename, "-vframes", "1", "-q:v", "2", thumb_path, "-y"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+                )
+            except Exception:
+                thumb_path = None
+
+        if not os.path.exists(thumb_path) if thumb_path else True:
             thumb_path = None
 
         title = info.get("title", "Downloaded Video")
@@ -255,4 +263,20 @@ async def quality_callback(client, callback_query: CallbackQuery):
 
     except Exception as e:
         await status_msg.edit_text(
-            f
+            f"⚠️ **Download Failed!**\n"
+            f"Reason: `{str(e)[:200]}`"
+        )
+
+    finally:
+        URL_STORAGE.pop(msg_id, None)
+        for path in (file_path, thumb_path):
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+
+if __name__ == "__main__":
+    print("🤖 Bot is running on Railway with Thumbnail support...")
+    app.run()
